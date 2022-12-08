@@ -1,0 +1,14 @@
+{
+  "id": {
+    "S": "1"
+  },
+  "AppointmentStatus": {
+    "S": "COMPLETED"
+  },
+  "CustomerName": {
+    "S": "Mick Shaw"
+  },
+  "CustomerPhone": {
+    "S": "+15551234567"
+  }
+}
