@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Pinpoint Two Way SMS
+
+Resources:
+  PinpointProject:
+    Type: AWS::Pinpoint::App
+    Properties: 
+      Name: DCNETtwowaySMSApplication
+  PinpointSMSChannel:
+    Type: AWS::Pinpoint::SMSChannel
+    Properties: 
+      ApplicationId: !Ref PinpointProject
+      Enabled: true
+  FeedbackReqSender:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs14.x
+      CodeUri: feedbackreqsender/
+      Handler: index.handler
+      Role: !GetAtt DCNETtwowaySMSFunctionIAMRole.Arn
+      AutoPublishAlias: "live"
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt DCNETtwowaySMSAppointmentsTable.StreamArn
+            BatchSize: 100
+            StartingPosition: TRIM_HORIZON
+      Environment:
+        Variables:
+          APPLICATION_ID: !Ref PinpointProject
+  FeedbackReceiver:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - DCNETtwowaySMSSqsQueue
+    Properties:
+      Runtime: nodejs14.x
+      CodeUri: feedbackreceiver/
+      Handler: index.handler
+      Role: !GetAtt DCNETtwowaySMSFunctionIAMRole.Arn
+      AutoPublishAlias: "live"
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DCNETtwowaySMSSqsQueue.Arn
+            BatchSize: 10
+            Enabled: true
+      Environment:
+        Variables:
+          APPLICATION_ID: !Ref PinpointProject
+
+  DCNETtwowaySMSFeedbacksTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: AppointmentId
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: feedbacks
+  MessageLookupTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: FeedbackMessageId
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: message-lookup
+  DCNETtwowaySMSAppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: id
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput: 
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      TableName: appointments
+  DCNETtwowaySMSSqsQueue:
+    Type: AWS::SQS::Queue
+    Properties: 
+      KmsMasterKeyId: !Ref DCNETtwowaySMSKmsKey
+  DCNETtwowaySMSKmsKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: DCNETtwowaySMS KMS Key
+      Enabled: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action: kms:*
+          Resource: "*"
+          Principal:
+            AWS: !Join [ "", [ "arn:aws:iam::", !Ref "AWS::AccountId", ":root" ] ]
+        - Effect: Allow
+          Action: kms:*
+          Resource: "*"
+          Principal:
+            Service: 'sns.amazonaws.com'
+        - Effect: Allow
+          Action: kms:*
+          Resource: "*"
+          Principal:
+            Service: 'sms-voice.amazonaws.com'
+
+  DCNETtwowaySMSSqsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref DCNETtwowaySMSSqsQueue
+      PolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal: "*"
+          Action: "sqs:*"
+          Resource: "*"
+          Condition:
+            ArnEquals:
+              "aws:SourceArn": !Ref DCNETtwowaySMSSnsTopic
+  DCNETtwowaySMSSnsTopic:
+      Type: AWS::SNS::Topic
+      Properties: 
+        KmsMasterKeyId: !Ref DCNETtwowaySMSKmsKey
+  DCNETtwowaySMSSqsToSnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt DCNETtwowaySMSSqsQueue.Arn
+      Protocol: sqs
+      RawMessageDelivery: true
+      TopicArn: !Ref DCNETtwowaySMSSnsTopic
+  DCNETtwowaySMSFunctionIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: DCNETtwowaySMSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: PinpointAccess
+                Effect: Allow
+                Action: 'mobiletargeting:SendMessages'
+                Resource: '*'
+              - Sid: CloudwatchLogsAccess
+                Effect: Allow
+                Action: 'logs:*'
+                Resource: '*'
+              - Sid: SQSAccess
+                Effect: Allow
+                Action: 'sqs:*'
+                Resource: '*'
+              - Sid: DynamoDBAccess
+                Effect: Allow
+                Action: 'dynamodb:*'
+                Resource: '*'
+              - Sid: KmsAccess
+                Effect: Allow
+                Action: 'kms:Decrypt'
+                Resource: '*'
