@@ -1,154 +1,252 @@
-//xxxFeedBackReqSender.js
-//
-// Created by: Mick Shaw
-// Contact Information: voice.eng@dc.gov
-// Date: 12/07/2022
-// Subject: xxxxDFeedReqSender.js
-//
-// --------------------------------
-// The flow of events starts when a Amazon DynamoDB table item, 
-// representing an online appointment, changes its status to COMPLETED. 
-// An AWS Lambda function which is subscribed to these changes over DynamoDB Streams 
-// detects this change and sends an SMS to the customer by using 
-// Amazon Pinpoint API’s sendMessages operation.
+/**
+ * xxxFeedBackReqSender.js
+ *
+ * Author: Mick Shaw
+ * Email: voice.eng@dc.gov
+ * Date: 05/14/2023
+ * Each time a recipient replies to an SMS, 
+ * Amazon Pinpoint publishes the reply event to an Amazon SNS topic
+ *  which is subscribed by an Amazon SQS queue. 
+ * Amazon Pinpoint will also add a messageId to this event which allows 
+ * us to bind it to a sendMessages operation call.
 
-// Amazon Pinpoint delivers the SMS to the recipient and generates a unique message ID
-// to the AWS Lambda function. The Lambda function then adds this message ID 
-// to a DynamoDB table called “message-lookup”. This table is used for tracking 
-// different feedback requests sent during a multi-step conversation and 
-// associate them with the appointment ids. At this stage, the 
-// Lambda function also populates another table “feedbacks” which will hold the 
-// feedback responses that will be sent as SMS reply messages.
-//  
-//
-// --------------------------------    
+ * This AWS Lambda function polls these reply events from the Amazon SQS queue. 
+ * It checks whether the reply is in the correct format (i.e. a number) and 
+ * also associated with a previous request. If all conditions are met, 
+ * the AWS Lambda function checks the ConversationStage attribute’s value 
+ * from the message-lookup table. 
+ * According to the current stage and the SMS answer received, 
+ * AWS Lambda function will determine the next step.
+
+ **/
 
 
-
-const AWS = require('aws-sdk');
+const AWS = require("aws-sdk");
 const docClient = new AWS.DynamoDB.DocumentClient();
 const pinpoint = new AWS.Pinpoint();
 const aws_region = "us-east-1";
 
 exports.handler = async (event) => {
-  try {
-    const appointments = await getAllAppointments();
-    for (const appointment of appointments) {
-      try {
-        const { id, CustomerPhone, AppointmentStatus } = appointment;
-        const destinationNumber = CustomerPhone;
-        const message = "This message is from DC Medicaid. It’s time to renew your Medicaid coverage! Don’t wait to update your contact information! Click here to go to districtdirect.dc.gov to update your info, and then check your mail for important information, including your renewal deadline. Reply STOP to opt out.";
-         // Check if SMS has already been sent for the appointment
-        if (AppointmentStatus === 'Sent') {
-          console.log('SMS already sent for appointment ID:', id);
-          continue; // Skip to the next appointment
-        }
-        
-        const smsParams = {
-          ApplicationId: process.env.APPLICATION_ID,
-          MessageRequest: {
-            Addresses: {
-              [destinationNumber]: {
-                ChannelType: 'SMS'
-              }
-            },
-            MessageConfiguration: {
-              SMSMessage: {
-                Body: message,
-                MessageType: 'TRANSACTIONAL'
-              }
+  console.log("Lambda triggered with event: " + JSON.stringify(event));
+  //Source of this lambda function is the SQS engine.
+  if(!event.Records) return "ERROR: Unexpected payload.";
+  let hasError=false;
+  for (const item of event.Records) {
+       try{
+         let body=JSON.parse(item.body);
+         let messageBody=body.messageBody;
+         let messageId=body.previousPublishedMessageId;
+         let destinationNumber=body.originationNumber;
+         //update the feedbacks table with the feedback number received.
+         var feedback = parseInt(messageBody);
+         if(!isNaN(feedback)){
+         	//determine the conversation stage. If this is the first feedback from the user, stage returns as 1.
+            let lookupData=await lookupMEDICAIDIDAndStage(messageId); // if messageid is not known throws an error. 
+         	let currentStage=lookupData.ConversationStage;
+         	let MEDICAIDID=lookupData.MEDICAIDID;
+         	let message;
+         	let isConversationFinished=true;
+         	if(currentStage==1){
+            	//update the feedback score
+            	//send thank you sms
+	        	message="I'm sorry, but this is not a monitored number.  For additional information please call the DC Public Benefits Call Center at 202.727.5355. Thank you! ";
+	            	currentStage=currentStage+1;
+	            	isConversationFinished=false;
+	           	await updateDynamoDbFeedbackScore1 (MEDICAIDID, feedback);
+	                        }
+            else if(currentStage==2){
+                //update the feedback score
+            	//send thank you sms
+                message ="I'm sorry, but this is not a monitored number.  For additional information please call the DC Public Benefits Call Center at 202.727.5355. Thank you! ";
+                	currentStage=currentStage+1;
+	            	isConversationFinished=false;
+	           	await updateDynamoDbFeedbackScore2 (MEDICAIDID, feedback);
+	            
             }
-          }
-        };
+            else if(currentStage==3){
+                //update the feedback score
+            	//send thank you sms
+	            message ="I'm sorry, but this is not a monitored number.  For additional information please call the DC Public Benefits Call Center at 202.727.5355. Thank you! ";
+	            	currentStage=currentStage+1;
+	            	isConversationFinished=false;
+	           await updateDynamoDbFeedbackScore3 (MEDICAIDID, feedback);
+	            
+            }
+             else if(currentStage==4){
+                //send thank you sms
+	           await updateDynamoDbFeedbackScore4 (MEDICAIDID, feedback);
+	            message ="I'm sorry, but this is not a monitored number.  For additional information please call the DC Public Benefits Call Center at 202.727.5355. Thank you! ";
+	            	currentStage=currentStage+1;
+	            	isConversationFinished=true;
+	           
+            }
+            else
+            	throw ('unknown stage');
 
-        const messageResponse = await sendSMS(smsParams);
-        const messageId = messageResponse['MessageResponse']['Result'][destinationNumber]['MessageId'];
-        
-        await updateAppointmentStatus(id, messageId, AppointmentStatus);  
-        
-        await addFeedbackRecord(id, destinationNumber);
-        await addMessageLookupRecord(messageId, id);
+            var smsParams = {
+	                        ApplicationId: process.env.APPLICATION_ID,
+	                        MessageRequest: {
+	                          Addresses: {
+	                            [destinationNumber]: {
+	                              ChannelType: 'SMS'
+	                            }
+	                          },
+	                          MessageConfiguration: {
+	                            SMSMessage: {
+	                              Body: message,
+	                              MessageType: 'TRANSACTIONAL'
+	                            }
+	                          }
+	                        }
+	            };
 
-        console.log("SMS sent and records added successfully for appointment ID:", id);
-      } catch (err) {
-        console.error(err, err.stack);
-        throw new Error("Failed to send SMS and add records for appointment ID:", appointment.id);
-      }
-    }
+            let result=await sendSMS(smsParams);
+            messageId=result['MessageResponse']['Result'][destinationNumber]['MessageId'];
 
-    console.log("All appointments processed successfully.");
-  } catch (err) {
-    console.error(err, err.stack);
-    throw new Error("Failed to fetch appointments from the table.");
-  }
-};
+            if(isConversationFinished==false){
+            	//if conversation will continue, add the last messageid and the new stage to the lookup table
+            	//add this messageid to message-id order-id lookup table
+                    var params = {
+                                TableName: "message-lookup",
+                                ReturnConsumedCapacity: "TOTAL",
+                                Item: {
+                                    "FeedbackMessageId": messageId,
+                                    "MEDICAIDID": MEDICAIDID,
+                                    "ConversationStage": currentStage
+                                }
+                    };
+                    result= await docClient.put(params).promise();
+            }
+        }//isNAN
+       }
+       catch(err){
+        //sms's which include non-numeric responses or which doesn't have corresponding feedbackmessageids will be ignored.
+         console.error(err.name, err.message);
+       }
+  }//for
+  return "OK";
+};//eventHandler
 
-async function getAllAppointments() {
-  const params = {
-    TableName: "appointments",
-  };
 
-  const result = await docClient.scan(params).promise();
-  return result.Items;
+async function lookupMEDICAIDIDAndStage(messageId){
+	try {
+			var params = {
+			  TableName : 'message-lookup',
+			  Key: {
+			    FeedbackMessageId: messageId
+			  }
+			};
+	    	const data = await docClient.get(params).promise();
+	    	return data.Item;
+	} catch (err) {
+	    console.log("Failure", err.message)
+	    throw err;
+	}
 }
 
-async function sendSMS(params) {
-  return new Promise((resolve, reject) => {
-    pinpoint.sendMessages(params, function(err, data) {
-      if (err) {
-        console.error(err.message);
-        reject(err);
-      } else {
-        resolve(data);
-      }
+async function updateDynamoDbFeedbackScore1 (MEDICAIDID, feedbackScore){
+	  const strAppintmentId=MEDICAIDID.toString();
+	  let params = {
+	      TableName:'feedbacks',
+	      Key:{
+	          "MEDICAIDID": strAppintmentId
+	      },
+	      UpdateExpression: "set FeedbackScore = :val1",
+	      ConditionExpression: "attribute_exists(MEDICAIDID)",
+	      ExpressionAttributeValues:{
+	          ":val1":feedbackScore
+	      },
+	      ReturnValues:"UPDATED_NEW"
+	  };
+	  try {
+		    const data = await docClient.update(params).promise();
+		    return data;
+	 } catch (err) {
+		    console.log("Failure", err.message)
+		    throw err;
+	 }
+}
+
+
+async function updateDynamoDbFeedbackScore2 (MEDICAIDID, feedbackScore){
+	  const strMEDICAIDID=MEDICAIDID.toString();
+	  let params = {
+	      TableName:'feedbacks',
+	      Key:{
+	          "MEDICAIDID": strMEDICAIDID
+	      },
+	      UpdateExpression: "set FeedbackScore2 = :val1",
+	      ConditionExpression: "attribute_exists(MEDICAIDID)",
+	      ExpressionAttributeValues:{
+	          ":val1":feedbackScore
+	      },
+	      ReturnValues:"UPDATED_NEW"
+	  };
+	  try {
+		    const data = await docClient.update(params).promise();
+		    return data;
+	 } catch (err) {
+		    console.log("Failure", err.message)
+		    throw err;
+	 }
+}
+async function updateDynamoDbFeedbackScore3 (MEDICAIDID, feedbackScore){
+	  const strMEDICAIDID=MEDICAIDID.toString();
+	  let params = {
+	      TableName:'feedbacks',
+	      Key:{
+	           "MEDICAIDID": strMEDICAIDID
+	      },
+	      UpdateExpression: "set FeedbackScore3 = :val1",
+	      ConditionExpression: "attribute_exists(MEDICAIDID)",
+	      ExpressionAttributeValues:{
+	          ":val1":feedbackScore
+	      },
+	      ReturnValues:"UPDATED_NEW"
+	  };
+	  try {
+		    const data = await docClient.update(params).promise();
+		    return data;
+	 } catch (err) {
+		    console.log("Failure", err.message)
+		    throw err;
+	 }
+}
+
+async function updateDynamoDbFeedbackScore4 (MEDICAIDID, feedbackScore){
+	  const strMEDICAIDID=MEDICAIDID.toString();
+	  let params = {
+	      TableName:'feedbacks',
+	      Key:{
+	          "MEDICAIDID": strMEDICAIDID
+	      },
+	      UpdateExpression: "set FeedbackScore4 = :val1",
+	      ConditionExpression: "attribute_exists(MEDICAIDID)",
+	      ExpressionAttributeValues:{
+	          ":val1":feedbackScore
+	      },
+	      ReturnValues:"UPDATED_NEW"
+	  };
+	  try {
+		    const data = await docClient.update(params).promise();
+		    return data;
+	 } catch (err) {
+		    console.log("Failure", err.message)
+		    throw err;
+	 }
+}
+async function sendSMS (params) {
+    return new Promise ((resolve,reject) => {
+        pinpoint.sendMessages(params, function(err, data) {
+                      // If something goes wrong, print an error message.
+                      if(err) {
+                        console.log(err.message);
+                        reject(err);
+                      // Otherwise, show the unique ID for the message.
+                      } else {
+                        resolve(data);
+                      }
+        });
+ 
     });
-  });
-}
-
-async function addFeedbackRecord(appointmentId, destinationNumber) {
-  const params = {
-    TableName: "feedbacks",
-    ReturnConsumedCapacity: "TOTAL",
-    Item: {
-      "AppointmentId": appointmentId,
-      "FeedbackScore": 'Not captured',
-      "FeedbackScore2": 'Not captured',
-      "FeedbackScore3": 'Not captured',
-      "FeedbackScore4": 'Not captured',
-      "Timestamp": Math.floor(new Date().getTime() / 1000.0),
-      "DestinationNumber": destinationNumber
-    }
-  };
-
-  await docClient.put(params).promise();
-}
-
-async function addMessageLookupRecord(messageId, appointmentId) {
-  const params = {
-    TableName: "message-lookup",
-    ReturnConsumedCapacity: "TOTAL",
-    Item: {
-      "FeedbackMessageId": messageId,
-      "AppointmentId": appointmentId,
-      "ConversationStage": 1
-    }
-  };
-
-  await docClient.put(params).promise();
-}
-
-async function updateAppointmentStatus(appointmentId, messageId, currentStatus) {
-  const params = {
-    TableName: "appointments",
-    Key: {
-      "id": appointmentId
-    },
-    UpdateExpression: "SET AppointmentStatus = :status, MessageId = :messageId",
-    ExpressionAttributeValues: {
-      ":status": "Sent",
-      ":messageId": messageId
-    }
-  };
-
-  await docClient.update(params).promise();
 }
