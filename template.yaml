@@ -7,7 +7,7 @@ Resources:
   PinpointProject:
     Type: AWS::Pinpoint::App
     Properties: 
-      Name: DCNETtwowaySMSApplication
+      Name: DHCFMedicaidtwowaySMSApplication
   PinpointSMSChannel:
     Type: AWS::Pinpoint::SMSChannel
     Properties: 
@@ -56,7 +56,7 @@ Resources:
     Type: AWS::Serverless::SimpleTable
     Properties:
       PrimaryKey:
-        Name: AppointmentId
+        Name: MEDICAIDID
         Type: String
       ProvisionedThroughput:
         ReadCapacityUnits: 1
@@ -86,7 +86,7 @@ Resources:
         WriteCapacityUnits: 1
       StreamSpecification:
         StreamViewType: NEW_IMAGE
-      TableName: appointments
+      TableName: MedicaidNotifications
   DCNETtwowaySMSSqsQueue:
     Type: AWS::SQS::Queue
     Properties: 
